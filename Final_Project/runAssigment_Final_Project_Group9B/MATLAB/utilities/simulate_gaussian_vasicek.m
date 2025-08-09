@@ -1,0 +1,6 @@
+function [cop_price, cop_up, cop_down, varExp] = simulate_gaussian_vasicek( ...
+                discount, Kd_calib, Ku_list, rho_eq, recovery, p)
+    N_sim = 1e5;
+    [cop_price, cop_up, cop_down, varExp] = gaussian_copula( ...
+          discount, Kd_calib, Ku_list, N_sim, rho_eq, recovery, p, 500);
+end

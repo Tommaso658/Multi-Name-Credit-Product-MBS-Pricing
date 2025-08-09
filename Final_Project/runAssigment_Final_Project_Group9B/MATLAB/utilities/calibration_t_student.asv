@@ -1,0 +1,63 @@
+function [MSE_min, rho_model, idx_min, nu_list, nu_star, rho_star_vec, MSE_list] = calibration_t_student(discount, corr_mkt, Kd_calibration, Ku_list, recovery, p, displayFlag,flag)
+    
+    if flag == 0
+        
+        [MSE_min, rho_model, idx_min, nu_list, MSE_list] = calibration_freedom_t_student_LHP(discount, corr_mkt, Kd_calibration, ...
+                                      Ku_list, recovery, p, displayFlag);
+    end
+    if flag == 1 
+        nu_list_imp = linspace(2,151,151);      % ν values greater or equal to 2
+        n_nu        = numel(nu_list_imp);       % Number of ν grid points
+        n_tranches  = numel(Ku_list);           % Number of tranches
+        
+        rho_matrix  = NaN(n_nu,n_tranches);     % Matrix to store ρ*(ν, tranche)
+        MSE_nu      = NaN(n_nu,1);              % MSE for each ν across all tranches
+        
+        % Options for fsolve (used to calibrate ρ)
+        optsFS = optimoptions('fsolve', 'Display','off', ...
+                                       'TolFun',1e-12, ...
+                                       'MaxIterations',500);
+        
+        % Outer loop: iterate over ν values
+        for i = 1:n_nu
+            nu = nu_list_imp(i);
+        
+            % Inner loop: iterate over each tranche
+            for j = 1:n_tranches
+                Ku = Ku_list(j);
+                Kd = Kd_calibration;
+        
+                % Target price from Vasicek model using market correlation
+                price_target = price_LHP_vasicek(discounts, recovery, Ku, Kd, ...
+                                                 corr_mkt(j), p);
+        
+                % Define function: t-student price(ρ, ν) - target = 0
+                eq_fct = @(rho) price_LHP_t_student(discounts, recovery, Ku, Kd, ...
+                                                    rho, p, nu) - price_target;
+        
+                try
+                    rho_star = fsolve(eq_fct, 0.30, optsFS);  % Initial guess: 0.30
+                catch
+                    warning('fsolve did not converge for ν = %.1f, tranche %d', nu, j);
+                    rho_star = NaN;
+                end
+        
+                rho_matrix(i,j) = rho_star;  % Save calibrated ρ* for (ν, tranche)
+            end
+        
+            % Compute MSE between calibrated and market correlations
+            diffsq = (rho_matrix(i,:) - corr_mkt).^2;
+            MSE_nu(i) = mean(diffsq, 'omitnan');  % Use nan-safe mean
+        end
+        
+        % Identify ν* that minimizes the total MSE
+        [MSE_min, idx_min] = min(MSE_nu);
+        nu_star      = nu_list_imp(idx_nu_star-1);
+        rho_star_vec = rho_matrix(idx_nu_star-1,:);  % Vector of calibrated ρ* at ν*
+        
+    end
+    end
+    if flag == 2
+
+    end
+    

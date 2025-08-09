@@ -1,0 +1,469 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  runAssignmentFinalProject_Group9B.m
+%  Financial Engineering Project – AY 2024/2025
+%  Group 9B
+%
+%  Multi-name Credit Product Pricing and Calibration using 
+%  the Double t-Student Copula Model
+%
+%  Objective:
+%   - (A) Calibrate the double t-Student model under the LHP hypothesis.
+%   - (B) Evaluate the impact of the LHP assumption on tranche pricing.
+%   - (C) Calibrate using the KL approximation.
+%   - (D) Price tranches under a Vasicek model.
+%   - (E) [Optional] Compare with Li’s model using Gaussian copula.
+%
+%  Dataset:
+%   - 500 homogeneous mortgages, each with:
+%       - Notional = €2M
+%       - Recovery rate = 40%
+%       - Default probability over T = 4 years = 6%
+%
+%  Notes:
+%   - Outputs are expressed in percentage of notional.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear               % Clear all variables from workspace
+close all;          % Close all open figure windows
+clc;                % Clear the command window
+format long         % Set output display to long numeric format
+
+warning('off', 'all');  % Suppress all warnings (e.g. fsolve convergence issues)
+
+addpath('utilities/');
+
+%% Load market data and computation of the discount factor
+
+load('datesSet.mat');      % Market dates for the yield curve
+load('ratesSet.mat');      % Interest rate instruments
+load('cSelect.mat');       % Market-implied correlations for tranches
+load('discounts.mat');     % Discount factors computed from bootstrapping
+load('dates.mat');         % Dates corresponding to discount factors
+
+formatData = 'dd/mm/yyyy'; % Date format (check local machine settings)
+
+% Optionally, you can read data directly from Excel:
+% [datesSet, ratesSet] = readExcelData('MktData_CurveBootstrap', formatData);
+% [dates, discounts] = bootstrap(datesSet, ratesSet);
+
+settlement_date = datenum('02/FEB/2023');                          % Settlement Date of the contract
+maturity = change_convention_date(datenum('02/FEB/2027'));         % Maturity Date of the contract
+discount = getDiscount(discounts,maturity,dates,settlement_date);  % Discount factor at maturity date
+
+%% Define input parameters
+
+corr_mkt = [0.23, 0.26, 0.291, 0.323, 0.355];  % Market-implied correlations for each tranche
+Ku_list  = [0.03, 0.06, 0.09, 0.12, 0.22];     % Upper attachment points
+Kd_list  = [0, 0.03, 0.06, 0.09, 0.12];        % Lower attachment points
+Kd_calibration = 0;                            % Calibration starts from equity tranche
+p        = 0.06;                               % 4-year default probability
+notional = 2e6;                                % Notional per mortgage
+I        = 500;                                % Number of exposures (mortgages)
+recovery = 0.4;                                % Recovery rate
+
+%% A - Calibration of the correlation with a double t-student model with LHP Model
+% --------------------------------------------------------------------------------
+% Objective:
+%   Determine the optimal degrees of freedom ν* for the double t-Student copula model
+%   under the Large Homogeneous Portfolio (LHP) assumption.
+%
+% Calibration Procedure:
+%   - For each candidate value of ν, calibrate the asset correlation parameter ρ 
+%   such that the model price of the equity tranche matches its corresponding market price.
+%
+%   - Then, using the calibrated ρ, compute the Mean Squared Error (MSE) between 
+%   model and market prices across all tranches to assess the model's fit.
+%
+% Goal:
+%   Identify the value of ν that minimizes the MSE, i.e., the best fit to the 
+%   market data across all tranches.
+% --------------------------------------------------------------------------------
+
+% [Alternative commented version]
+% [MSE_min_LHP, rho_model_LHP, idx_min_LHP,nu_list,MSE_list_LHP] = calibration_freedom_t_student_LHP(discount, corr_mkt, Kd_calibration, Ku_list, recovery, p);
+
+[MSE_min_LHP, rho_model_LHP, idx_min_LHP, nu_list, MSE_list_LHP] = ...
+    calibration_freedom_t_student_LHP(discount, corr_mkt, Kd_calibration, ...
+                                      Ku_list, recovery, p, 'off');
+
+results.pointA.nu_list       = nu_list;
+results.pointA.MSE_list_LHP  = MSE_list_LHP;
+results.pointA.idx_min_LHP   = idx_min_LHP;
+results.pointA.MSE_min_LHP   = MSE_min_LHP;
+
+% --- A.2: Improved – Calibrate a distinct correlation for each tranche ---
+% Goal:
+%   Improve calibration by allowing a different correlation ρ* for each tranche.
+%   For each ν in the grid, we calibrate ρ*(ν) for every tranche (Ku, Kd)
+%   by solving an inverse pricing problem:
+%       price_t_student(ρ*, ν) = price_target (Vasicek model with ρ_mkt)
+%
+%   Then we compute the total MSE of the calibrated ρ* values versus the
+%   market-implied correlations, and select ν* that minimizes this MSE.
+
+nu_grid = linspace(2,151,151);              % stesso range di prima
+
+[rho_matrix, MSE_nu, nu_star, rho_star_vec] = ...
+    calibrate_rho_per_tranche( ...
+        discounts, recovery, Ku_list, Kd_calibration, ...
+        corr_mkt, p, nu_grid);
+
+results.pointA.nu_imp        = nu_grid;
+results.pointA.MSE_nu        = MSE_nu;
+results.pointA.nu_star       = nu_star;
+results.pointA.MSE_min_imp   =  min(MSE_nu);
+results.pointA.rho_star_vec  = rho_star_vec;
+
+% ----------- Display Results – Improved Calibration Output ---------------
+% This section prints the calibrated results in a clean and readable format
+
+fprintf('\n=== Improved Calibration Results ===\n');
+fprintf('Optimal ν*: %.4f\n', nu_star);
+fprintf('Minimum MSE: %.6e\n',min(MSE_nu));
+fprintf('\nCalibrated Correlations per Tranche:\n');
+fprintf('-----------------------------------------\n');
+fprintf('|  Ku (%%)  |  Market ρ  |  Calibrated ρ*  |\n');
+fprintf('-----------------------------------------\n');
+
+for i = 1:length(Ku_list)
+    fprintf('|  %6.2f  |   %6.3f   |     %6.3f     |\n', ...
+        Ku_list(i)*100, corr_mkt(i), rho_star_vec(i));
+end
+fprintf('-----------------------------------------\n\n');
+
+% ------------A.3: Single-call global calibration--------------------------
+% Goal:
+%   Optimize both ν and a single ρ simultaneously, rather than calibrating ρ for each ν.
+%   This is a global search in 2D: (ν, ρ) → min MSE(nu_model, ρ_model)
+
+% Objective function: MSE between model and market correlations
+obj = @(x) globalMSE(x(1), x(2), ...          % ν, ρ
+                     discount, recovery, p, ...
+                     Ku_list, Kd_calibration, corr_mkt);
+
+x0 = [10, 0.30];         % Initial guess: ν = 10, ρ = 0.30
+opts = optimset('Display','off', ...     % <-- niente output
+                'TolX',1e-4, ...
+                'TolFun',1e-4);
+
+% Perform unconstrained minimization using Nelder-Mead (fminsearch)
+[x_star, MSE_star] = fminsearch(obj, x0, opts);
+
+% Extract optimal parameters
+nu_star  = x_star(1);
+rho_star = x_star(2);
+
+results.pointA.global.nu_star_global   = nu_star;
+results.pointA.global.MSE_star_global  = MSE_star; 
+
+% Output results to Command Window
+fprintf('ν* = %.4f   ρ* = %.4f   MSE = %.4e\n', nu_star, rho_star, MSE_star);
+
+%% Plot point A
+plotResultsA(results);
+
+%% B – Preparation: use optimal ν from previous LHP calibration
+% ---------------------------------------------------------------------
+% We use the optimal ν obtained in Section A (from LHP calibration)
+% to evaluate the accuracy of tranche pricing using different approaches.
+%
+% Note: This value of ν is reused in Section C to ensure consistency.
+
+nu_optimal_LHP = nu_list(idx_min_LHP);  % Optimal ν from LHP calibration
+
+% Define the list of exposure sizes I ∈ [10, 1000] (20 log-spaced values)
+I_list = round(linspace(10, 1000, 20));
+
+% ---------- B.1: HP Prices (Exact)---------------------------------------
+% Compute "exact" prices of the tranches using the double t-student copula.
+% These prices are calculated numerically, without approximations,
+% and depend on both ν and I.
+
+tranche_prices_HP = tranche_prices_double_t_optimized(nu_optimal_LHP, I_list, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, rho_model_LHP, p, discount, 0);  % mode 0 = exact
+
+% ---------- B.2: KL Approximation Prices --------------------------------
+% Compute approximate prices of the tranches using the KL (Kullback-Leibler) expansion.
+% This method speeds up computations by using analytical approximations,
+% especially for large I.
+
+tranche_prices_KL = tranche_prices_double_t_optimized(nu_optimal_LHP, I_list, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, rho_model_LHP, p, discount, 1);  % mode 1 = KL approximation
+
+% --------- B.3: LHP Prices (Analytical limit as I → ∞) -------------------
+
+% Compute tranche prices under the Large Homogeneous Portfolio assumption,
+% which corresponds to the infinite-pool limit (I → ∞).
+
+tranche_prices_LHP = tranche_prices_double_t(nu_optimal_LHP, I_list, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, rho_model_LHP, p, discount, 2);  % mode 2 = LHP approximation
+
+results.pointB.I_list        = I_list;
+results.pointB.pricesHP      = tranche_prices_HP;
+results.pointB.pricesKL      = tranche_prices_KL;
+results.pointB.pricesLHP     = tranche_prices_LHP;
+
+% Tranche widths in percentage, 1×5 row vector
+width = Ku_list - Kd_list;      % [1 5]
+
+% Portfolio size, 20×1 column vector
+I_vec = I_list(:);              % [20 1]
+
+% Absolute prices: 20×5 .* 1×5 .* 20×1 → 20×5
+prices_HP_EUR  = tranche_prices_HP  .* width .* I_vec * notional;
+prices_KL_EUR  = tranche_prices_KL  .* width .* I_vec * notional;
+prices_LHP_EUR = tranche_prices_LHP .* width .* I_vec * notional;
+
+%% Plot point B
+plotResultsB(results);
+
+%% C – Calibration of the double t-student model with KL Approximation
+% -------------------------------------------------------------------------
+% Objective:
+%   Repeat the calibration of the double t-student copula model using the
+%   KL (Kullback-Leibler) approximation instead of the full numerical method.
+%
+% Context:
+%   In Section A, we calibrated the model by pricing the equity tranche exactly.
+%   Here, we speed up the calibration using analytical approximations (KL),
+%   which allows us to efficiently evaluate the objective for many degrees of
+%   freedom (ν).
+%
+% Method:
+%   - For each ν, calibrate a single correlation ρ* such that the equity tranche
+%     price from the KL approximation matches its market price.
+%   - Then, for this ρ* and ν, compute the implied prices for all other tranches
+%     and infer their model-implied correlations.
+%   - Finally, compute the MSE between model and market correlations.
+%
+% Output:
+%   - ν* = optimal degrees of freedom (minimizing MSE)
+%   - ρ* = optimal correlation
+%   - MSE_min_KL = minimum MSE
+%   - MSE_list_KL = MSE per ν in the grid
+
+[MSE_min_KL, rho_model_KL, idx_min_KL, nu_list, MSE_list_KL] = ...
+    calibration_freedom_t_student_KL_vect(discount, corr_mkt, Kd_calibration, ...
+                                     Ku_list, recovery, p, I, 'off');
+
+results.pointC.nu_list       = nu_list;
+results.pointC.MSE_list_KL   = MSE_list_KL;
+results.pointC.idx_min_KL    = idx_min_KL;
+results.pointC.MSE_min_KL    = MSE_min_KL; 
+
+% NOTE: Depending on the ν grid and number of tranches, this operation may
+% still take several minutes, even with the KL approximation.
+
+% --  Display calibration results (KL)  ----------------------------------
+% Variables already in memory:
+%   MSE_min_KL   –  minimum Mean-Squared Error
+%   rho_model_KL –  optimal correlation ρ* (scalar)
+%   idx_min_KL   –  index of ν* inside the grid 'nu_list'
+%   nu_list      –  vector of the ν values that were tested
+%   MSE_list_KL  –  vector of the MSE corresponding to the ν grid
+
+% 1) Compact header with the key numbers
+fprintf('\n================  CALIBRATION – KL  =================\n');
+fprintf('Optimal ν*        : %.4f   (grid index %d)\n', ...
+        nu_list(idx_min_KL), idx_min_KL);
+fprintf('Optimal ρ*        : %.6f\n', rho_model_KL);
+fprintf('Minimum MSE       : %.6e\n', MSE_min_KL);
+fprintf('=====================================================\n\n');
+
+%% Plot point C
+plotPointC(results);
+
+%% D – Pricing with the Vasicek Model (I = 500)
+% -------------------------------------------------------------------------
+% Objective:
+%   Compute and compare tranche prices using the standard Vasicek model.
+%   The Vasicek model uses a one-factor Gaussian copula with fixed correlation.
+%
+% Parameters:
+%   - I = 500 exposures (consistent with the dataset)
+%   - ρ = market-implied correlation for equity tranche (first entry of corr_mkt)
+%
+% Methods:
+%   - Exact (finite I, full numerical integration)
+%   - KL approximation (analytical expansion, valid for large I)
+%   - LHP approximation (limit case as I → ∞)
+%-------------------------------------------------------------------------
+
+I_vasicek = 500;  % Number of exposures used for pricing
+
+% ----- D.1: Exact Vasicek Pricing (Mode 0) -------------------------------
+% Compute tranche prices under the Vasicek model using full numerical integration.
+% This method captures the granularity of finite I = 500 and is considered the "truth".
+
+tranche_prices_vasicek_HP = tranche_prices_vasicek(I_vasicek, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, corr_mkt(1), p, discount, 0);  % mode 0 = exact
+
+% ----- D.2: KL Approximation (Mode 1) ------------------------------------
+% Use KL (Kullback-Leibler) expansion to approximate the prices of Vasicek tranches.
+% This method is faster but less accurate for small I.
+
+tranche_prices_vasicek_KL = tranche_prices_vasicek(I_vasicek, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, corr_mkt(1), p, discount, 1);  % mode 1 = KL approx.
+
+% ----- D.3: LHP Approximation (Mode 2) -----------------------------------
+% Use the analytical LHP formula to price tranches assuming I → ∞.
+% This is the theoretical benchmark and the fastest method.
+
+tranche_prices_vasicek_LHP = tranche_prices_vasicek(I_vasicek, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, corr_mkt(1), p, discount, 2);  % mode 2 = LHP approx.
+
+% ----- D.4: Vasicek prices versus I --------------------------------------
+
+tranche_prices_vasicek_HP_list = tranche_prices_vasicek_D(I_list, ...
+    Kd_calibration, Kd_list, Ku_list, ...
+    recovery, corr_mkt(1), p, discount, 0);  % mode 0 = exact
+
+% width = width of each tranche, 1 × 5 row vector
+width = Ku_list - Kd_list;          % [1 5]
+
+% Absolut Pricing (1×5 .* 1×5) → 1×5
+pricesVas_HP_EUR  = tranche_prices_vasicek_HP  .* width * I_vasicek * notional;
+pricesVas_KL_EUR  = tranche_prices_vasicek_KL  .* width * I_vasicek * notional;
+pricesVas_LHP_EUR = tranche_prices_vasicek_LHP .* width * I_vasicek * notional;
+
+%----------------- Save in results struct ---------------------------------
+results.pointD.I_vas         = I_vasicek;
+results.pointD.prVas_HP      = tranche_prices_vasicek_HP;
+results.pointD.prVas_KL      = tranche_prices_vasicek_KL;
+results.pointD.prVas_LHP     = tranche_prices_vasicek_LHP;
+results.pointD.I_list        = I_list;
+results.pointD.prVas_HP_list = tranche_prices_vasicek_HP_list;
+
+%% Plot point D
+plotPointD(results);
+
+%%  POINT E  – Comparison of Copula Pricing Models
+
+%--------- E.1: Gaussian Copula (ρ da double-t in LHP) --------------------
+% Objective:
+%   Simulate tranche prices using a standard Gaussian copula (Li model),
+%   but using the correlation calibrated via the double t-student copula
+%   in the LHP setting.
+%
+% Purpose:
+%   Compare how the Gaussian model behaves when fed with the ρ calibrated
+%   under the t-Student assumption, especially for pricing accuracy.
+% -------------------------------------------------------------------------
+
+[copula_price_gct, copula_price_up_gct, copula_price_down_gct, ...
+ var_exp_loss_gct] = simulate_gaussian_copula_LHP( ...
+        discount, Kd_calibration, Ku_list, ...
+        rho_model_LHP, recovery, p);
+
+%--------- E.2: Gaussian Copula – Prices vs I (ρ t-Student-LHP) ----------
+% Objective:
+%   Evaluate the behavior of the Gaussian copula model for different
+%   numbers of exposures I (from 10 to 1000, logarithmic spacing).
+%
+% Why:
+%   To assess the convergence of Monte Carlo prices to the LHP approximation
+%   as the number of entities increases.
+%
+% Setup:
+%   - 20 values of I ∈ [10, 1000]
+%   - 3 tranches: Equity, Mezz-1, Mezz-2
+%   - Correlation from t-student LHP calibration
+%   - Model: Gaussian copula (Li's 2000 model)
+% -------------------------------------------------------------------------
+
+[I_list_E, prices_Li_HP_t, prices_Li_HP_up_t, prices_Li_HP_down_t] = ...
+        prices_vs_I_gaussian_LHP( ...
+        discount, Kd_calibration, Ku_list, ...
+        rho_model_LHP, recovery, p, 1e5);
+
+%--------- E.3: Double t-Student Copula (ν = 6) ---------------------
+% Objective:
+%   Simulate tranche prices using the double t-student copula model
+%   with calibrated correlation and fixed degrees of freedom ν = 7.
+%
+% Note:
+%   Both ν and I should ideally come from previous calibrations.
+% -------------------------------------------------------------------------
+
+[copula_price_t, copula_price_t_up, copula_price_t_down, ...
+ varExpLoss_t] = simulate_double_t_copula( ...
+        discount, Kd_calibration, Ku_list, ...
+        rho_model_LHP, recovery, p, 6);
+
+%--------- E.4: Double t-Student – Prices vs I ----------------------
+% Objective:
+%   Evaluate the behavior of the Gaussian copula model for different
+%   numbers of exposures I (from 10 to 1000, logarithmic spacing).
+%
+% Why:
+%   To assess the convergence of Monte Carlo prices to the LHP approximation
+%   as the number of entities increases.
+%
+% Setup:
+%   - 20 values of I ∈ [10, 1000]
+%   - 3 tranches: Equity, Mezz-1, Mezz-2
+%   - Correlation from t-student LHP calibration
+%   - Model: Gaussian copula (Li's 2000 model)
+% -------------------------------------------------------------------------
+
+[prices_t_HP, prices_t_up, prices_t_down, ...
+ tranche_prices_HP_t_comparaison, score] = ...
+        prices_vs_I_double_t( ...
+        discount, Kd_calibration, Ku_list, ...
+        rho_model_LHP, recovery, p, nu_optimal_LHP, 1e5, Kd_list);
+
+%--------- E.5: Gaussian Copula (ρ equity-implied Vasicek) ----------
+% Objective:
+%   Run the Gaussian copula model using the correlation implied from
+%   the Vasicek model (ρ_market for equity tranche).
+% -------------------------------------------------------------------------
+
+[copula_price, copula_price_up, copula_price_down, ...
+ var_exp_loss] = simulate_gaussian_vasicek( ...
+        discount, Kd_calibration, Ku_list, ...
+        corr_mkt(1), recovery, p);
+
+%--------- E.6: Gaussian Copula – Prices vs I (ρ Vasicek) -----------
+% Objective:
+%   Evaluate the behavior of the Gaussian copula model for different
+%   numbers of exposures I (from 10 to 1000, logarithmic spacing).
+%
+% Why:
+%   To assess the convergence of Monte Carlo prices to the LHP approximation
+%   as the number of entities increases.
+%
+% Setup:
+%   - 20 values of I ∈ [10, 1000]
+%   - 3 tranches: Equity, Mezz-1, Mezz-2
+%   - Correlation from t-student LHP calibration
+%   - Model: Gaussian copula (Li's 2000 model)
+% -------------------------------------------------------------------------
+
+[prices_Li_HP, prices_Li_HP_up, prices_Li_HP_down, ...
+ tranche_prices_HP_comparaison, score_2] = ...
+        prices_vs_I_gaussian_vasicek( ...
+        discount, Kd_calibration, Ku_list, ...
+        corr_mkt(1), recovery, p, 1e5, Kd_list);
+
+%----------------- Save in results struct -------------------------
+results.pointE.I_list_E      = I_list_E;
+results.pointE.prLi_t        = prices_Li_HP_t;
+results.pointE.prLi_t_up     = prices_Li_HP_up_t;
+results.pointE.prLi_t_down   = prices_Li_HP_down_t;
+results.pointE.prTS_HP       = prices_t_HP;
+results.pointE.prTS_up       = prices_t_up;
+results.pointE.prTS_down     = prices_t_down;
+results.pointE.pr_comp_ts    = tranche_prices_HP_t_comparaison;
+results.pointE.prLi_vas      = prices_Li_HP;
+results.pointE.prLi_vas_up   = prices_Li_HP_up;
+results.pointE.prLi_vas_down = prices_Li_HP_down;
+results.pointE.prTS_vas_HP   = tranche_prices_HP_comparaison;
+
+%% Plot point E
+plotPointE(results);

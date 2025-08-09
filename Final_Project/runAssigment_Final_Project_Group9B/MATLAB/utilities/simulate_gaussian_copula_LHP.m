@@ -1,0 +1,6 @@
+function [cop_price, cop_up, cop_down, varExp] = simulate_gaussian_copula_LHP( ...
+                discount, Kd_calib, Ku_list, rho_LHP, recovery, p)
+    N_sim = 1e5;
+    [cop_price, cop_up, cop_down, varExp] = gaussian_copula( ...
+          discount, Kd_calib, Ku_list, N_sim, rho_LHP, recovery, p, 500);
+end
